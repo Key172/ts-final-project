@@ -1,33 +1,36 @@
 ---
 title: "TSfinal-project"
 author: "廖芳翊"
-date: "2020/5/28"
+date: "2020/6/04"
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE,
                       cache = TRUE,
-                      warning = FALSE)
+                      warning = FALSE,
+                      message = F)
 library(lubridate)
 library(astsa)
 library(tidyverse)
 library(magrittr)
 library(dplyr)
 library(FinTS)
-library(astsa)
+library(rugarch)
 ```
 
 ### data loading and preprocessing
 
 先將資料載入, 可以看到是一戶人家從 2006/12/16 至 2010/11/26 在冷氣以及熱水器上每分鐘的用電量, 首先可以看到有 25979 個 missing values
-```{r}
-data = read.table("C://Users//User//Desktop//NTHU//109_spring//Time_Series//household_power_consumption.txt", header=T, sep=",")
+```{r "data loading"}
+data = read.table("household_power_consumption.txt", header=T, sep=";")
 data$Date = as.Date(data$Date,tryFormats = c("%Y-%m-%d", "%d/%m/%Y"))
 sum(is.na(data[,9]))
-data[,9][is.na(data[,9])] = 0
+#data[,9][is.na(data[,9])] = 0
 ```
-我們將 missing value 補上 0, 接著將每天的總用電量加起來, 如此一來就變成一筆長度為 1442 的時間序列 ( 1442天 )
+我們將 missing value 補上 0。由於遺失值通常是在一段時間裡持續發生，所以會有一段時間裡值皆為 0 的情況，所以平均或是總和數值就會較低，在後續的分析中就特別留意該區間，會盡量避開避免其影響。接著將每天的總用電量加起來，如此一來就變成一筆長度為 1442 的時間序列 ( 1442天 )。
 
 
 ```{r}
@@ -37,25 +40,27 @@ by.date <- summarise(by.date,
 data_sum = by.date
 ```
 
-然後先看其走勢
+然後先看其走勢：
 
-```{r}
+```{r "plot wrt time"}
 inds <- seq(as.Date("2006-12-16"), as.Date("2010-11-26"), by = "day")
 sub3 = ts(data_sum[,2], start = c(2006, as.numeric(format(inds[1], "%j"))),frequency = 365)
 ts.plot(sub3)
 ```
 
-可以看到, 此戶人家的用電量, 有一些規律存在, 在年末年初時會較高, 年中時會較低, 且在年初年末時, 變異比較大, 相反的, 在年中時變異較小
+可以看到，此戶人家的用電量有一些規律存在，在年末年初時會較高，年中時會較低，且在年初年末時，變異比較大，相反的，在年中時變異較小
 
-### detrend
+### Detrend and deseasonalize
 
-運用 difference (lag = 1) 將此時間序列 detrend, 再將其走勢畫出
+運用 difference (lag = 1) 將此時間序列 detrend， 再將其走勢畫出：
 
-```{r}
+```{r detrend}
 plot.ts(diff(sub3))
 ```
 
-可以看到變異的確有隨著時間改變, 接著看看 acf plot 以及 pacf plot
+可以看到變異的確有隨著時間改變，例如在 2010 年初的上下震幅很大而年中則較小。
+
+接著看看 acf plot 以及 pacf plot：
 
 ```{r}
 diff_sub3 = diff(sub3)
@@ -63,54 +68,87 @@ acf(diff_sub3,50)
 pacf(diff_sub3,50)
 ```
 
-可以看到 acf 有明顯的 seasonality (lag = 7), 所以接著試著將他 deseasonality, 再繪出 acf, pacf plot
+可以看到 acf 有明顯的 seasonality (lag = 7)，所以接著試著將他 deseasonalize，再繪出 acf, pacf plot
 
 ```{r}
 acf(diff(diff_sub3, lag = 7), 50)
 pacf(diff(diff_sub3, lag = 7), 50)
 ```
 
-可以看到 acf 的 seasonality 已經不見了, 但是可以看到 pacf 處好像有一些 seasonal (lag = 6 ) 的資訊涵蓋在其中, 所以接下來或許可以在 model 中將其除去
+可以看到 acf 的 seasonality 已經不見了，但是可以看到 pacf 處好像有一些 seasonal (lag = 6 ) 的資訊涵蓋在其中，所以接下來或許可以在 model 中將其除去
 
-### fit model
+### Fit model for mean structure 
+以下是fit SAIRIMA 的結果及其 residual plot
 
 ```{r}
-sarima.fit = arima(sub3, order=c(0,1,9), seasonal=list(order=c(0,1,6),period=7))
+sarima.fit = arima(sub3,
+                   order=c(0,1,8),
+                   seasonal=list(order=c(0,1,8),period=7)
+                   )
 ts.plot(cbind(sub3,sub3-sarima.fit$residuals), col=1:2)
+ts.plot(sarima.fit$residuals)
 ```
 
+對 residuals 畫 acf plots，可以看到大部分都有過 WN test，這顯示在 mean structure 配適的不錯，error structure (residuals) 接近 uncorrelated。
+
 ```{r}
-ts.plot(sarima.fit$residuals)
 acf(sarima.fit$residuals, 50)
 pacf(sarima.fit$residuals, 50)
 ```
 
+再看 diagnostic plot，能看到 Ljung-Box test也顯示 residuals 接近 uncorrelated，但是從 standardized residuals plot 可以看到似乎 residuals 並不是 serially independent，可能有 GARCH 效應：
+
 ```{r}
 tsdiag(sarima.fit)
 ```
+
+### Test for GARCH effect
+
+接著畫 residuals 的平方的圖去看是否有 GARCH 效應：
 
 ```{r}
 acf(sarima.fit$residuals^2, 50)
 pacf(sarima.fit$residuals^2, 50)
 ```
 
-
-### ARCH test
+接著對 residuals 的平方做 Ljung-Box test 以及 LM test，可以檢驗出其確實沒有 serially independent：
 
 ```{r}
 Box.test(sarima.fit$residuals^2, lag = 1,type="Ljung") 
 ```
 
-### Lagrange multipier test
-
 ```{r}
 ArchTest(sarima.fit$residuals,lags = 1)
 ```
+
 the result of both Lagrange multipier test and ARCH test reject H0 under level $\alpha = 0.05$
 
 ### GARCH
 
 ```{r}
 
-```
+rt1 = diff(diff_sub3, lag = 7)
+sarima.fit
+spec = ugarchspec(variance.model = list(model = "sGARCH",
+                                        garchOrder = c(2,2)
+                                        ),
+                  mean.model = list(armaOrder = c(3,8),
+                                    arfima = FALSE
+                                    ),
+                  distribution.model = 'norm')
+fit3 = ugarchfit(spec = spec, data = rt1, solver = 'solnp')
+fit3@fit$matcoef%>% round(.,6)
 
+et = residuals(fit3,standardize=T)
+Box.test(et^2,lag = 1,type = "Ljung")
+ArchTest(et,lags = 1)
+
+par(mfrow=c(1,1))
+acf(et^2,30)
+
+# par(mfrow=c(2,2))
+# acf(et,30)
+# pacf(et,30)
+# acf(et^2,30)
+# pacf(et^2,30)
+```
